@@ -1,13 +1,30 @@
 project('vs-placebo', ['c', 'cpp'],
-  default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++11'],
+  default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++11'],
   meson_version: '>=0.46.0',
   version: '1.4.1'
 )
 
 win32 = host_machine.system() == 'windows' or host_machine.system() == 'cgywin'
 
-placebo = dependency('libplacebo', required: true, static: win32)
-vapoursynth_dep = dependency('vapoursynth', static: win32).partial_dependency(includes: true, compile_args: true)
+if win32
+  add_project_link_arguments('-static', language: ['c', 'cpp'])
+endif
+
+libplacebo_default_options = [
+  'default_library=static',
+  'vulkan=enabled',
+  'opengl=disabled',
+  'd3d11=disabled',
+  'glslang=enabled',
+  'shaderc=enabled',
+  'lcms=enabled',
+  'demos=false',
+]
+if win32
+  libplacebo_default_options += ['shaderc=enabled']
+endif
+
+placebo = subproject('libplacebo', default_options: libplacebo_default_options).get_variable('libplacebo')
 dovi = dependency('dovi', required: false)
 
 use_dovi = not win32 and dovi.found()
@@ -26,10 +43,16 @@ sources = []
 
 subdir('src')
 
+if win32
+  subdir('vulkan')
+  vulkan = declare_dependency(link_args: 'vulkan/libvulkan-1.a')
+else
+  vulkan = declare_dependency()
+endif
+
 shared_module('vs_placebo', sources,
-  dependencies: [placebo, vapoursynth_dep, dovi],
+  dependencies: [placebo, vulkan, dovi],
   link_with: [p2p],
   name_prefix: 'lib',
-  install_dir : join_paths(vapoursynth_dep.get_pkgconfig_variable('libdir'), 'vapoursynth'),
   install: true
 )
