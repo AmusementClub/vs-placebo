@@ -1,0 +1,39 @@
+name: Build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Which tag to create and release?"
+        required: true
+        default: v0.0.0
+
+jobs:
+  build:
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v2.3.1
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+
+      - name: Set up environment
+        shell: msys2 {0}
+        run: |
+          pacman -S --noconfirm mingw-w64-x86_64-{gcc,pkg-config,meson,python-mako,vulkan-devel,libplacebo}
+
+      - name: Build release
+        shell: msys2 {0}
+        run: |
+          meson build
+          ninja -C build
+          strip build/libvs_placebo.dll
+
+      - name: Upload release
+        uses: actions/upload-artifact@v2
+        with:
+          name: vs-placebo
+          path: |
+            build/libvs_placebo.dll
