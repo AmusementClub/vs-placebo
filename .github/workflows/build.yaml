@@ -37,3 +37,13 @@ jobs:
           name: vs-placebo
           path: |
             build/libvs_placebo.dll
+
+      - name: Release
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: build/libvs_placebo.dll
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          prerelease: true
