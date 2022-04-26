@@ -18,7 +18,7 @@ see the libplacebo header files.
 
 &nbsp;
 
-#### ``placebo.Tonemap(clip clip[, int src_csp, int dst_csp, float src_max, float src_min, float dst_max, float dst_min, int dynamic_peak_detection, float smoothing_period, float scene_threshold_low, scene_threshold_high, int intent, int gamut_mode, int tone_mapping_function, int tone_mapping_mode, float tone_mapping_param, float tone_mapping_crosstalk])``
+#### ``placebo.Tonemap(clip clip[, int src_csp, int dst_csp, float src_max, float src_min, float dst_max, float dst_min, int dynamic_peak_detection, float smoothing_period, float scene_threshold_low, scene_threshold_high, int intent, int gamut_mode, int tone_mapping_function, int tone_mapping_mode, float tone_mapping_param, float tone_mapping_crosstalk, bool use_dovi])``
 
 Performs color mapping (which includes tonemapping from HDR to SDR, but can do a lot more).  
 Expects RGB48 or YUVxxxP16 input.  
@@ -33,9 +33,13 @@ For example, to map from [BT.2020, PQ] (HDR) to traditional [BT.709, BT.1886] (S
 - ``smoothing_period, scene_threshold_low, scene_threshold_high``: peak detection params. See [here](https://github.com/haasn/libplacebo/blob/master/src/include/libplacebo/shaders/colorspace.h#L85).
 - ``gamut_mode, tone_mapping_function, tone_mapping_mode, tone_mapping_param, tone_mapping_crosstalk``:
  [Color mapping params](https://github.com/haasn/libplacebo/blob/master/src/include/libplacebo/shaders/colorspace.h#L237).
+- ``use_dovi``: Whether to use the Dolby Vision RPU for ST2086 metadata. Defaults to true when tonemapping from Dolby Vision.
 
-For Dolby Vision support, git versions of FFmpeg and ffms2 are required, as well as libplacebo v4.157.0.185 or newer.  
+For Dolby Vision support, FFmpeg 5.0 minimum and git ffms2 are required, as well as libplacebo v4.157.0.185 or newer.  
 Currently, [libdovi](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) is required.
+
+For Windows, `libdovi` is available as a [precompiled DLL](https://github.com/quietvoid/dovi_tool/releases/tag/libdovi-1.6.3).  
+The library must be placed in the same directory as `vs-placebo` and be named `dovi.dll`.
 
 &nbsp;
 
@@ -84,6 +88,13 @@ using the supplied filter options, which are identical to ``Resample``’s.
 
 &nbsp;
 
+### Debugging `libplacebo` processing
+
+All the filters can take a `log_level` argument corresponding to a `pl_log_level`.  
+Defaults to 2, meaning only errors are logged.
+
+&nbsp;
+
 ### Installing
 
 If you’re on Arch, just do
@@ -104,5 +115,5 @@ Otherwise it's as simple as `DESTDIR= ninja -C build install`.
 &nbsp;
 
 Building on Linux for Windows:  
-Some experimental build system based on `mpv-winbuild-cmake`: https://github.com/quietvoid/mpv-winbuild-cmake/commits/vs-placebo-winbuild  
-YMMV.
+Some experimental build system based on `mpv-winbuild-cmake`: https://github.com/quietvoid/mpv-winbuild-cmake/commits/vs-placebo-libdovi  
+Suggested to use on Arch Linux. YMMV.

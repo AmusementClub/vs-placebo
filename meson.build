@@ -1,7 +1,7 @@
 project('vs-placebo', ['c', 'cpp'],
   default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++11'],
-  meson_version: '>=0.46.0',
-  version: '1.4.1'
+  meson_version: '>=0.51.0',
+  version: '1.4.2'
 )
 
 win32 = host_machine.system() == 'windows' or host_machine.system() == 'cgywin'
@@ -27,7 +27,14 @@ endif
 placebo = subproject('libplacebo', default_options: libplacebo_default_options).get_variable('libplacebo')
 dovi = dependency('dovi', required: false)
 
-use_dovi = not win32 and dovi.found()
+if win32
+  cc = meson.get_compiler('c')
+  dovi = cc.find_library('dovi', required : false)
+else
+  dovi = dependency('dovi', required: false)
+endif
+
+use_dovi = dovi.found()
 
 config_vsplacebo = configuration_data()
 config_vsplacebo.set('HAVE_DOVI', use_dovi)
