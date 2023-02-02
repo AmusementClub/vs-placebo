@@ -3,4 +3,7 @@
 	url = https://github.com/sekrit-twc/libp2p
 [submodule "subprojects/libplacebo"]
 	path = subprojects/libplacebo
-	url = https://github.com/SaltyChiang/libplacebo.git
+	url = https://github.com/haasn/libplacebo.git
+[submodule "dovi_tool"]
+	path = dovi_tool
+	url = https://github.com/quietvoid/dovi_tool

@@ -25,13 +25,22 @@ if win32
 endif
 
 placebo = subproject('libplacebo', default_options: libplacebo_default_options).get_variable('libplacebo')
+
+cargo = find_program('cargo', required: false)
+cargo_c = find_program('cargo-cinstall', required: false)
+use_dovi = cargo.found() and cargo_c.found()
+
+if use_dovi
+  dovi_src = join_paths(meson.current_source_dir(), 'dovi_tool', 'dolby_vision', 'Cargo.toml')
+  dovi_dst = join_paths(meson.current_build_dir(), 'libdovi.d')
+  run_command('cargo', 'cinstall', '--release', '--manifest-path=@0@'.format(dovi_src), '--prefix=@0@'.format(dovi_dst))
+endif
+
 dovi = dependency('dovi', required: false)
 
-if win32
+if win32 and not dovi.found()
   cc = meson.get_compiler('c')
   dovi = cc.find_library('dovi', required : false)
-else
-  dovi = dependency('dovi', required: false)
 endif
 
 use_dovi = dovi.found()
