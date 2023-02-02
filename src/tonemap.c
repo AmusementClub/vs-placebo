@@ -26,11 +26,13 @@ enum supported_colorspace {
 typedef struct {
     VSNodeRef *node;
     const VSVideoInfo *vi;
-    struct priv * vf;
+    struct priv *vf;
 
     struct pl_render_params *renderParams;
 
     enum supported_colorspace src_csp;
+    enum supported_colorspace dst_csp;
+
     struct pl_color_space *src_pl_csp;
     struct pl_color_space *dst_pl_csp;
 
@@ -45,7 +47,7 @@ typedef struct {
     bool use_dovi;
 } TMData;
 
-bool vspl_tonemap_do_planes(TMData *tm_data, struct pl_plane* planes,
+bool vspl_tonemap_do_planes(TMData *tm_data, struct pl_plane *planes,
                  const struct pl_color_repr src_repr, const struct pl_color_repr dst_repr)
 {
     struct priv *p = tm_data->vf;
@@ -79,7 +81,7 @@ bool vspl_tonemap_reconfig(void *priv, struct pl_plane_data *data, const VSAPI *
 {
     struct priv *p = priv;
 
-    const struct pl_fmt *fmt = pl_plane_find_fmt(p->gpu, NULL, &data[0]);
+    pl_fmt fmt = pl_plane_find_fmt(p->gpu, NULL, &data[0]);
     if (!fmt) {
         vsapi->logMessage(mtCritical, "Failed configuring filter: no good texture format!\n");
         return false;
@@ -107,7 +109,7 @@ bool vspl_tonemap_reconfig(void *priv, struct pl_plane_data *data, const VSAPI *
         .pixel_stride = 6
     };
 
-    const struct pl_fmt *out = pl_plane_find_fmt(p->gpu, NULL, &plane_data);
+    pl_fmt out = pl_plane_find_fmt(p->gpu, NULL, &plane_data);
 
     ok &= pl_tex_recreate(p->gpu, &p->tex_out[0], pl_tex_params(
         .w = data->width,
@@ -169,8 +171,8 @@ bool vspl_tonemap_filter(TMData *tm_data, void *dst, struct pl_plane_data *src, 
 }
 
 static void VS_CC VSPlaceboTMInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    TMData *d = (TMData *) * instanceData;
-    VSVideoInfo new_vi = (VSVideoInfo) * (d->vi);
+    TMData *d = (TMData *) *instanceData;
+    VSVideoInfo new_vi = (VSVideoInfo) *(d->vi);
     const VSFormat f = *new_vi.format;
 
     new_vi.format = vsapi->registerFormat(f.colorFamily, f.sampleType, f.bitsPerSample, 0, 0, core);
@@ -181,12 +183,22 @@ static void VS_CC VSPlaceboTMInit(VSMap *in, VSMap *out, void **instanceData, VS
 static const VSFrameRef *VS_CC VSPlaceboTMGetFrame(int n, int activationReason, void **instanceData, void **frameData,
                                           VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi)
 {
-    TMData *tm_data = (TMData *) * instanceData;
+    TMData *tm_data = (TMData *) *instanceData;
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(n, tm_data->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
         const VSFrameRef *frame = vsapi->getFrameFilter(n, tm_data->node, frameCtx);
+
+        int err;
+        const VSMap *props = vsapi->getFramePropsRO(frame);
+
+        // Validate props for Dolby Vision mapping
+        if (tm_data->src_csp == CSP_DOVI && vsapi->propNumElements(props, "DolbyVisionRPU") == -1) {
+            vsapi->setFilterError("placebo.Tonemap: Clip is missing `DolbyVisionRPU` prop for Dolby Vision mapping!", frameCtx);
+
+            return NULL;
+        }
 
         int w = vsapi->getFrameWidth(frame, 0);    
         int h = vsapi->getFrameHeight(frame, 0);
@@ -222,9 +234,6 @@ static const VSFrameRef *VS_CC VSPlaceboTMGetFrame(int n, int activationReason, 
             .levels = PL_COLOR_LEVELS_FULL,
             .alpha = PL_ALPHA_PREMULTIPLIED,
         };
-
-        int err;
-        const VSMap *props = vsapi->getFramePropsRO(frame);
 
         int64_t props_levels = vsapi->propGetInt(props, "_ColorRange", 0, &err);
 
@@ -314,8 +323,6 @@ static const VSFrameRef *VS_CC VSPlaceboTMGetFrame(int n, int activationReason, 
                     size_t doviRpuSize = (size_t) vsapi->propGetDataSize(props, "DolbyVisionRPU", 0, &err);
 
                     if (doviRpu && doviRpuSize) {
-                        // fprintf(stderr, "Got Dolby Vision RPU, size %"PRIi64" at %"PRIxPTR"\n", doviRpuSize, (uintptr_t) doviRpu);
-
                         DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(doviRpu, doviRpuSize);
                         const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
 
@@ -328,7 +335,7 @@ static const VSFrameRef *VS_CC VSPlaceboTMGetFrame(int n, int activationReason, 
                             dovi_rpu_free_header(header);
                         }
 
-                        // Profile 5
+                        // Profile 5, 7 or 8 mapping
                         if (tm_data->src_csp == CSP_DOVI) {
                             src_repr.sys = PL_COLOR_SYSTEM_DOLBYVISION;
                             src_repr.dovi = dovi_meta;
@@ -342,8 +349,18 @@ static const VSFrameRef *VS_CC VSPlaceboTMGetFrame(int n, int activationReason, 
                         if (header->vdr_dm_metadata_present_flag) {
                             const DoviVdrDmData *vdr_dm_data = dovi_rpu_get_vdr_dm_data(rpu);
 
-                            src_pl_csp->hdr.min_luma =
-                                pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, vdr_dm_data->source_min_pq / 4095.0f);
+                            // Should avoid changing the source black point when mapping to PQ
+                            // As the source image already has a specific black point,
+                            // and the RPU isn't necessarily ground truth on the actual coded values
+                            //
+                            // Set target black point to the same as source
+                            if (tm_data->src_csp == CSP_DOVI && tm_data->dst_csp == CSP_HDR10) {
+                                tm_data->dst_pl_csp->hdr.min_luma = src_pl_csp->hdr.min_luma;
+                            } else {
+                                src_pl_csp->hdr.min_luma =
+                                    pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, vdr_dm_data->source_min_pq / 4095.0f);
+                            }
+
                             src_pl_csp->hdr.max_luma =
                                 pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, vdr_dm_data->source_max_pq / 4095.0f);
 
@@ -559,6 +576,10 @@ void VS_CC VSPlaceboTMCreate(const VSMap *in, VSMap *out, void *userData, VSCore
     dst_pl_csp->hdr.max_luma = vsapi->propGetFloat(in, "dst_max", 0, &err);
     dst_pl_csp->hdr.min_luma = vsapi->propGetFloat(in, "dst_min", 0, &err);
 
+    int64_t dst_prim = vsapi->propGetInt(in, "dst_prim", 0, &err);
+    if (!err)
+        dst_pl_csp->primaries = dst_prim;
+
     pl_color_space_infer(dst_pl_csp);
 
     int peak_detection = vsapi->propGetInt(in, "dynamic_peak_detection", 0, &err);
@@ -584,6 +605,7 @@ void VS_CC VSPlaceboTMCreate(const VSMap *in, VSMap *out, void *userData, VSCore
     d.src_pl_csp = src_pl_csp;
     d.dst_pl_csp = dst_pl_csp;
     d.src_csp = src_csp;
+    d.dst_csp = dst_csp;
     d.original_src_max = src_max;
     d.original_src_min = src_min;
     d.is_subsampled = d.vi->format->subSamplingW || d.vi->format->subSamplingH;
