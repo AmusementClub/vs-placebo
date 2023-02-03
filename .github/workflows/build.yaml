@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: windows-2019
     steps:
-      - uses: actions/checkout@v2.3.1
+      - uses: actions/checkout@v3
         with:
           submodules: recursive
 
@@ -32,7 +32,7 @@ jobs:
           strip build/libvs_placebo.dll
 
       - name: Upload release
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: vs-placebo
           path: |
