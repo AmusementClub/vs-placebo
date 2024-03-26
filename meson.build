@@ -1,10 +1,10 @@
 project('vs-placebo', ['c', 'cpp'],
   default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++11'],
   meson_version: '>=0.51.0',
-  version: '1.4.3'
+  version: '1.4.4'
 )
 
-win32 = host_machine.system() == 'windows' or host_machine.system() == 'cgywin'
+win32 = host_machine.system() == 'windows' or host_machine.system() == 'cygwin'
 
 if win32
   add_project_link_arguments('-static', language: ['c', 'cpp'])
@@ -28,25 +28,20 @@ placebo = subproject('libplacebo', default_options: libplacebo_default_options).
 
 cargo = find_program('cargo', required: false)
 cargo_c = find_program('cargo-cinstall', required: false)
-use_dovi = cargo.found() and cargo_c.found()
-
-if use_dovi
+if cargo.found() and cargo_c.found()
   dovi_src = join_paths(meson.current_source_dir(), 'dovi_tool', 'dolby_vision', 'Cargo.toml')
   dovi_dst = join_paths(meson.current_build_dir(), 'libdovi.d')
   run_command('cargo', 'cinstall', '--release', '--manifest-path=@0@'.format(dovi_src), '--prefix=@0@'.format(dovi_dst))
 endif
 
 dovi = dependency('dovi', required: false)
-
 if win32 and not dovi.found()
   cc = meson.get_compiler('c')
   dovi = cc.find_library('dovi', required : false)
 endif
 
-use_dovi = dovi.found()
-
 config_vsplacebo = configuration_data()
-config_vsplacebo.set('HAVE_DOVI', use_dovi)
+config_vsplacebo.set('HAVE_DOVI', dovi.found())
 
 configure_file(
   output: 'config_vsplacebo.h',

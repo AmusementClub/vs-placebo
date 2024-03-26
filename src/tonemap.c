@@ -12,7 +12,7 @@
 #include "vs-placebo.h"
 
 #ifdef HAVE_DOVI
-#include "libdovi/rpu_parser.h"
+#include <libdovi/rpu_parser.h>
 #include "dovi_meta.h"
 #endif
 
@@ -38,8 +38,8 @@ typedef struct {
 
     pthread_mutex_t lock;
 
-    int64_t original_src_max;
-    int64_t original_src_min;
+    float original_src_max;
+    float original_src_min;
     
     bool is_subsampled;
     enum pl_chroma_location chromaLocation;
@@ -153,12 +153,9 @@ bool vspl_tonemap_filter(TMData *tm_data, void *dst, struct pl_plane_data *src, 
         return false;
     }
 
-    pl_fmt out_fmt = p->tex_out[0]->params.format;
-
     // Download planes
     ok = pl_tex_download(p->gpu, pl_tex_transfer_params(
         .tex = p->tex_out[0],
-        .row_pitch = (src->row_stride / src->pixel_stride) * out_fmt->texel_size,
         .ptr = dst,
     ));
 
@@ -275,7 +272,31 @@ static const VSFrameRef *VS_CC VSPlaceboTMGetFrame(int n, int activationReason, 
             src_pl_csp->hdr.min_luma = vsapi->propGetFloat(props, "MasteringDisplayMinLuminance", 0, &err);
         }
 
-        pl_color_space_infer(src_pl_csp);
+#if PL_API_VER >= 246
+        const double scene_avg = vsapi->propGetFloat(props, "PLSceneAvg", 0, &err);
+
+        const int scene_max_len = vsapi->propNumElements(props, "PLSceneMax");
+
+        if (scene_max_len) {
+            const double *prop_scene_max = vsapi->propGetFloatArray(props, "PLSceneMax", &err);
+            if (prop_scene_max) {
+                if (scene_max_len == 1) {
+#if PL_API_VER >= 257
+                    src_pl_csp->hdr.avg_pq_y = pl_hdr_rescale(PL_HDR_NITS, PL_HDR_PQ, scene_avg);
+                    src_pl_csp->hdr.max_pq_y = pl_hdr_rescale(PL_HDR_NITS, PL_HDR_PQ, prop_scene_max[0]);
+#else
+                    src_pl_csp->hdr.scene_avg = scene_avg;
+                    src_pl_csp->hdr.scene_max[0] = src_pl_csp->hdr.scene_max[1] = src_pl_csp->hdr.scene_max[2] = prop_scene_max[0];
+#endif // PL_API_VER >= 257
+                } else if (scene_max_len == 3) {
+                    src_pl_csp->hdr.scene_avg = scene_avg;
+                    src_pl_csp->hdr.scene_max[0] = prop_scene_max[0];
+                    src_pl_csp->hdr.scene_max[1] = prop_scene_max[1];
+                    src_pl_csp->hdr.scene_max[2] = prop_scene_max[2];
+                }
+            }
+        }
+#endif // PL_API_VER >= 246
 
         const double *primariesX = vsapi->propGetFloatArray(props, "MasteringDisplayPrimariesX", &err);
         const double *primariesY = vsapi->propGetFloatArray(props, "MasteringDisplayPrimariesY", &err);
@@ -313,74 +334,91 @@ static const VSFrameRef *VS_CC VSPlaceboTMGetFrame(int n, int activationReason, 
         }
 
         // DOVI
-        #if PL_API_VER >= 185
-            struct pl_dovi_metadata *dovi_meta = NULL;
-            uint8_t dovi_profile = 0;
+        struct pl_dovi_metadata *dovi_meta = NULL;
+        uint8_t dovi_profile = 0;
 
-            #ifdef HAVE_DOVI
-                if (tm_data->use_dovi && vsapi->propNumElements(props, "DolbyVisionRPU")) {
-                    uint8_t *doviRpu = (uint8_t *) vsapi->propGetData(props, "DolbyVisionRPU", 0, &err);
-                    size_t doviRpuSize = (size_t) vsapi->propGetDataSize(props, "DolbyVisionRPU", 0, &err);
+#ifdef HAVE_DOVI
+        if (tm_data->use_dovi && vsapi->propNumElements(props, "DolbyVisionRPU")) {
+            uint8_t *doviRpu = (uint8_t *) vsapi->propGetData(props, "DolbyVisionRPU", 0, &err);
+            size_t doviRpuSize = (size_t) vsapi->propGetDataSize(props, "DolbyVisionRPU", 0, &err);
 
-                    if (doviRpu && doviRpuSize) {
-                        DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(doviRpu, doviRpuSize);
-                        const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
+            if (doviRpu && doviRpuSize) {
+                DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(doviRpu, doviRpuSize);
+                const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
 
-                        if (!header) {
-                            fprintf(stderr, "Failed parsing RPU: %s\n", dovi_rpu_get_error(rpu));
-                        } else {
-                            dovi_profile = header->guessed_profile;
+                if (!header) {
+                    fprintf(stderr, "Failed parsing RPU: %s\n", dovi_rpu_get_error(rpu));
+                } else {
+                    dovi_profile = header->guessed_profile;
+                    dovi_meta = create_dovi_meta(rpu, header);
+                }
 
-                            dovi_meta = create_dovi_meta(rpu, header);
-                            dovi_rpu_free_header(header);
-                        }
+                // Profile 5, 7 or 8 mapping
+                if (tm_data->src_csp == CSP_DOVI) {
+                    src_repr.sys = PL_COLOR_SYSTEM_DOLBYVISION;
+                    src_repr.dovi = dovi_meta;
 
-                        // Profile 5, 7 or 8 mapping
-                        if (tm_data->src_csp == CSP_DOVI) {
-                            src_repr.sys = PL_COLOR_SYSTEM_DOLBYVISION;
-                            src_repr.dovi = dovi_meta;
-
-                            if (dovi_profile == 5) {
-                                dst_repr.levels = PL_COLOR_LEVELS_FULL;
-                            }
-                        }
-
-                        // Update mastering display from RPU
-                        if (header->vdr_dm_metadata_present_flag) {
-                            const DoviVdrDmData *vdr_dm_data = dovi_rpu_get_vdr_dm_data(rpu);
-
-                            // Should avoid changing the source black point when mapping to PQ
-                            // As the source image already has a specific black point,
-                            // and the RPU isn't necessarily ground truth on the actual coded values
-                            //
-                            // Set target black point to the same as source
-                            if (tm_data->src_csp == CSP_DOVI && tm_data->dst_csp == CSP_HDR10) {
-                                tm_data->dst_pl_csp->hdr.min_luma = src_pl_csp->hdr.min_luma;
-                            } else {
-                                src_pl_csp->hdr.min_luma =
-                                    pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, vdr_dm_data->source_min_pq / 4095.0f);
-                            }
-
-                            src_pl_csp->hdr.max_luma =
-                                pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, vdr_dm_data->source_max_pq / 4095.0f);
-
-                            if (vdr_dm_data->dm_data.level6) {
-                                const DoviExtMetadataBlockLevel6 *meta = vdr_dm_data->dm_data.level6;
-                                
-                                if (!maxCll || !maxFall) {
-                                    src_pl_csp->hdr.max_cll = meta->max_content_light_level;
-                                    src_pl_csp->hdr.max_fall = meta->max_frame_average_light_level;
-                                }
-                            }
-
-                            dovi_rpu_free_vdr_dm_data(vdr_dm_data);
-                        }
-                        
-                        dovi_rpu_free(rpu);
+                    if (dovi_profile == 5) {
+                        dst_repr.levels = PL_COLOR_LEVELS_FULL;
                     }
                 }
-            #endif
-        #endif
+
+                if (header) {
+                    if (header->vdr_dm_metadata_present_flag) {
+                        const DoviVdrDmData *vdr_dm_data = dovi_rpu_get_vdr_dm_data(rpu);
+
+                        // Should avoid changing the source black point when mapping to PQ
+                        // As the source image already has a specific black point,
+                        // and the RPU isn't necessarily ground truth on the actual coded values
+                        //
+                        // Set target black point to the same as source
+                        if (tm_data->src_csp == CSP_DOVI && tm_data->dst_csp == CSP_HDR10) {
+                            tm_data->dst_pl_csp->hdr.min_luma = src_pl_csp->hdr.min_luma;
+                        } else {
+                            src_pl_csp->hdr.min_luma =
+                                pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, vdr_dm_data->source_min_pq / 4095.0f);
+                        }
+
+                        src_pl_csp->hdr.max_luma =
+                            pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, vdr_dm_data->source_max_pq / 4095.0f);
+
+#if PL_API_VER >= 246
+                        if (vdr_dm_data->dm_data.level1) {
+                            const DoviExtMetadataBlockLevel1 *l1 = vdr_dm_data->dm_data.level1;
+
+#if PL_API_VER >= 257
+                            src_pl_csp->hdr.avg_pq_y = l1->avg_pq / 4095.0f;
+                            src_pl_csp->hdr.max_pq_y = l1->max_pq / 4095.0f;
+#else
+                            src_pl_csp->hdr.scene_avg = pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, l1->avg_pq / 4095.0f);
+
+                            const float max_luma = pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, l1->max_pq / 4095.0f);
+                            src_pl_csp->hdr.scene_max[0] = src_pl_csp->hdr.scene_max[1] = src_pl_csp->hdr.scene_max[2] = max_luma;
+#endif // PL_API_VER >= 257
+                        }
+#endif // PL_API_VER >= 246
+
+                        if (vdr_dm_data->dm_data.level6) {
+                            const DoviExtMetadataBlockLevel6 *meta = vdr_dm_data->dm_data.level6;
+                            
+                            if (!maxCll || !maxFall) {
+                                src_pl_csp->hdr.max_cll = meta->max_content_light_level;
+                                src_pl_csp->hdr.max_fall = meta->max_frame_average_light_level;
+                            }
+                        }
+
+                        dovi_rpu_free_vdr_dm_data(vdr_dm_data);
+                    }
+                    
+                    dovi_rpu_free_header(header);
+                }
+
+                dovi_rpu_free(rpu);
+            }
+        }
+#endif
+
+        pl_color_space_infer_map(src_pl_csp, tm_data->dst_pl_csp);
 
         struct pl_plane_data planes[3] = {};
         for (int i = 0; i < 3; ++i) {
@@ -486,8 +524,14 @@ void VS_CC VSPlaceboTMCreate(const VSMap *in, VSMap *out, void *userData, VSCore
     if (function_index >= pl_num_tone_map_functions) {
         function_index = 0;
     }
-
     colorMapParams->tone_mapping_function = pl_tone_map_functions[function_index];
+
+    const char *function_name = vsapi->propGetData(in, "tone_mapping_function_s", 0, &err);
+    if (function_name && !err) {
+        const struct pl_tone_map_function *tm_function = pl_find_tone_map_function(function_name);
+        if (tm_function)
+            colorMapParams->tone_mapping_function = tm_function;
+    }
 
     const double tone_mapping_param = vsapi->propGetFloat(in, "tone_mapping_param", 0, &err);
     colorMapParams->tone_mapping_param = tone_mapping_param;
@@ -504,6 +548,15 @@ void VS_CC VSPlaceboTMCreate(const VSMap *in, VSMap *out, void *userData, VSCore
     COLORM_PARAM(gamut_mode, Int)
     COLORM_PARAM(tone_mapping_mode, Int)
     COLORM_PARAM(tone_mapping_crosstalk, Float)
+#if PL_API_VER >= 247
+    COLORM_PARAM(visualize_lut, Int)
+#endif
+#if PL_API_VER >= 261
+    COLORM_PARAM(metadata, Int)
+#endif
+#if PL_API_VER >= 264
+    COLORM_PARAM(show_clipping, Int)
+#endif
 
     struct pl_peak_detect_params *peakDetectParams = malloc(sizeof(struct pl_peak_detect_params));
     *peakDetectParams = pl_peak_detect_default_params;
@@ -514,6 +567,9 @@ void VS_CC VSPlaceboTMCreate(const VSMap *in, VSMap *out, void *userData, VSCore
     PEAK_PARAM(smoothing_period, Float)
     PEAK_PARAM(scene_threshold_low, Float)
     PEAK_PARAM(scene_threshold_high, Float)
+#if PL_API_VER >= 264
+    PEAK_PARAM(percentile, Float)
+#endif
 
     struct pl_color_space *src_pl_csp = malloc((sizeof(struct pl_color_space)));
     struct pl_color_space *dst_pl_csp = malloc((sizeof(struct pl_color_space)));
@@ -565,13 +621,11 @@ void VS_CC VSPlaceboTMCreate(const VSMap *in, VSMap *out, void *userData, VSCore
             return;
     };
 
-    int64_t src_max = vsapi->propGetFloat(in, "src_max", 0, &err);
-    int64_t src_min = vsapi->propGetFloat(in, "src_min", 0, &err);
+    const float src_max = vsapi->propGetFloat(in, "src_max", 0, &err);
+    const float src_min = vsapi->propGetFloat(in, "src_min", 0, &err);
 
     src_pl_csp->hdr.max_luma = src_max;
     src_pl_csp->hdr.min_luma = src_min;
-
-    pl_color_space_infer(src_pl_csp);
 
     dst_pl_csp->hdr.max_luma = vsapi->propGetFloat(in, "dst_max", 0, &err);
     dst_pl_csp->hdr.min_luma = vsapi->propGetFloat(in, "dst_min", 0, &err);
@@ -579,8 +633,6 @@ void VS_CC VSPlaceboTMCreate(const VSMap *in, VSMap *out, void *userData, VSCore
     int64_t dst_prim = vsapi->propGetInt(in, "dst_prim", 0, &err);
     if (!err)
         dst_pl_csp->primaries = dst_prim;
-
-    pl_color_space_infer(dst_pl_csp);
 
     int peak_detection = vsapi->propGetInt(in, "dynamic_peak_detection", 0, &err);
     if (err)
