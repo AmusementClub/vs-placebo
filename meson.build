@@ -1,5 +1,5 @@
 project('vs-placebo', ['c', 'cpp'],
-  default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++11'],
+  default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++11'],
   meson_version: '>=0.51.0',
   version: '1.4.4'
 )
@@ -41,8 +41,10 @@ if win32 and not dovi.found()
   dovi = cc.find_library('dovi', required : false)
 endif
 
+use_dovi = dovi.found()
+
 config_vsplacebo = configuration_data()
-config_vsplacebo.set('HAVE_DOVI', dovi.found())
+config_vsplacebo.set('HAVE_DOVI', use_dovi)
 
 configure_file(
   output: 'config_vsplacebo.h',
