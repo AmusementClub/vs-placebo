@@ -1,5 +1,5 @@
 project('vs-placebo', ['c', 'cpp'],
-  default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c11', 'cpp_std=c++11'],
+  default_options: ['buildtype=release', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++11'],
   meson_version: '>=0.51.0',
   version: '1.4.4'
 )
@@ -11,6 +11,7 @@ if win32
 endif
 
 libplacebo_default_options = [
+  'cpp_std=c++17',
   'default_library=static',
   'vulkan=enabled',
   'opengl=disabled',

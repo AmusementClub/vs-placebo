@@ -23,6 +23,7 @@ jobs:
         shell: msys2 {0}
         run: |
           pacman -S --noconfirm mingw-w64-x86_64-{gcc,pkg-config,meson,python-mako,vulkan-devel,libplacebo,rust,cargo-c}
+          pacman -U --noconfirm https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-glslang-13.1.1-1-any.pkg.tar.zst
 
       - name: Build release
         shell: msys2 {0}
